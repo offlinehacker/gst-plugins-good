@@ -7,6 +7,10 @@ libgstvideomixer_la_SOURCES = \
 	videomixer.c \
 	blend.c \
 	videomixer2.c \
+        vs_image.c \
+        vs_scanline.c \
+        vs_4tap.c \
+        vs_fill_borders.c \
 	gstcollectpads2.c
 
 nodist_libgstvideomixer_la_SOURCES = $(ORC_NODIST_SOURCES)

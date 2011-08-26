@@ -62,6 +62,7 @@ struct _GstVideoMixerPad
   gint par_d;
 
   gint xpos, ypos;
+  guint width, height;
   guint zorder;
   gint blend_mode;
   gdouble alpha;

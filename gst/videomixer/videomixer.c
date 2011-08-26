@@ -79,6 +79,12 @@
 #include <gst/controller/gstcontroller.h>
 #include <gst/video/video.h>
 
+//Includes for video scaling
+#include "gstvideoscaleorc.h"
+#include "vs_image.h"
+#include "vs_4tap.h"
+#include "vs_fill_borders.h"
+
 #ifdef HAVE_STDLIB_H
 #include <stdlib.h>
 #endif
@@ -117,16 +123,29 @@ static gboolean gst_videomixer_sink_event (GstPad * pad, GstEvent * event);
 
 static void gst_videomixer_sort_pads (GstVideoMixer * mix);
 
-#define DEFAULT_PAD_ZORDER 0
-#define DEFAULT_PAD_XPOS   0
-#define DEFAULT_PAD_YPOS   0
-#define DEFAULT_PAD_ALPHA  1.0
+//Scale transformation functions
+static GstFlowReturn gst_video_scale_transform (GstVideoMixer * mix,
+    GstVideoMixerPad * pad, GstBuffer * in, guint8 * out);
+//static const guint8 * _get_black_for_format (GstVideoFormat format);
+static void gst_video_scale_setup_vs_image (VSImage * image,
+    GstVideoFormat format, gint component, gint width, gint height, gint b_w,
+    gint b_h, uint8_t * data);
+
+#define DEFAULT_PAD_ZORDER  0
+#define DEFAULT_PAD_XPOS    0
+#define DEFAULT_PAD_YPOS    0
+#define DEFAULT_PAD_WIDTH   0
+#define DEFAULT_PAD_HEIGHT  0
+#define DEFAULT_PAD_ALPHA   1.0
+#define DEFAULT_PROP_METHOD GST_VIDEO_SCALE_BILINEAR
 enum
 {
   PROP_PAD_0,
   PROP_PAD_ZORDER,
   PROP_PAD_XPOS,
   PROP_PAD_YPOS,
+  PROP_PAD_WIDTH,
+  PROP_PAD_HEIGHT,
   PROP_PAD_ALPHA
 };
 
@@ -153,6 +172,14 @@ gst_videomixer_pad_class_init (GstVideoMixerPadClass * klass)
       g_param_spec_int ("ypos", "Y Position", "Y Position of the picture",
           G_MININT, G_MAXINT, DEFAULT_PAD_YPOS,
           G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_PAD_XPOS,
+      g_param_spec_int ("width", "Width", "Width of the picture in mix",
+          0, G_MAXINT, DEFAULT_PAD_WIDTH,
+          G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_PAD_YPOS,
+      g_param_spec_int ("height", "Height", "Height of the picture in mix",
+          0, G_MAXINT, DEFAULT_PAD_HEIGHT,
+          G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property (gobject_class, PROP_PAD_ALPHA,
       g_param_spec_double ("alpha", "Alpha", "Alpha of the picture", 0.0, 1.0,
           DEFAULT_PAD_ALPHA,
@@ -174,6 +201,12 @@ gst_videomixer_pad_get_property (GObject * object, guint prop_id,
       break;
     case PROP_PAD_YPOS:
       g_value_set_int (value, pad->ypos);
+      break;
+    case PROP_PAD_WIDTH:
+      g_value_set_int (value, pad->width);
+      break;
+    case PROP_PAD_HEIGHT:
+      g_value_set_int (value, pad->height);
       break;
     case PROP_PAD_ALPHA:
       g_value_set_double (value, pad->alpha);
@@ -203,6 +236,12 @@ gst_videomixer_pad_set_property (GObject * object, guint prop_id,
       break;
     case PROP_PAD_YPOS:
       pad->ypos = g_value_get_int (value);
+      break;
+    case PROP_PAD_WIDTH:
+      pad->width = g_value_get_uint (value);
+      break;
+    case PROP_PAD_HEIGHT:
+      pad->height = g_value_get_uint (value);
       break;
     case PROP_PAD_ALPHA:
       pad->alpha = g_value_get_double (value);
@@ -512,6 +551,8 @@ gst_videomixer_pad_init (GstVideoMixerPad * mixerpad)
   mixerpad->zorder = DEFAULT_PAD_ZORDER;
   mixerpad->xpos = DEFAULT_PAD_XPOS;
   mixerpad->ypos = DEFAULT_PAD_YPOS;
+  mixerpad->width = DEFAULT_PAD_WIDTH;
+  mixerpad->height = DEFAULT_PAD_HEIGHT;
   mixerpad->alpha = DEFAULT_PAD_ALPHA;
 }
 
@@ -523,10 +564,12 @@ enum
 };
 
 #define DEFAULT_BACKGROUND VIDEO_MIXER_BACKGROUND_CHECKER
+#define DEFAULT_METHOD     GST_VIDEO_SCALE_BILINEAR
 enum
 {
   PROP_0,
-  PROP_BACKGROUND
+  PROP_BACKGROUND,
+  PROP_METHOD,
 };
 
 #define GST_TYPE_VIDEO_MIXER_BACKGROUND (gst_video_mixer_background_get_type())
@@ -550,6 +593,26 @@ gst_video_mixer_background_get_type (void)
         video_mixer_background);
   }
   return video_mixer_background_type;
+}
+
+#define GST_TYPE_VIDEO_MIXER_METHOD (gst_video_mixer_method_get_type())
+static GType
+gst_video_mixer_method_get_type (void)
+{
+  static GType video_mixer_method_type = 0;
+
+  static const GEnumValue video_mixer_methods[] = {
+    {GST_VIDEO_SCALE_NEAREST, "Nearest Neighbour", "nearest-neighbour"},
+    {GST_VIDEO_SCALE_BILINEAR, "Bilinear", "bilinear"},
+    {GST_VIDEO_SCALE_4TAP, "4-tap", "4-tap"},
+    {0, NULL, NULL},
+  };
+
+  if (!video_mixer_method_type) {
+    video_mixer_method_type =
+        g_enum_register_static ("GstVideoMixerMethod", video_mixer_methods);
+  }
+  return video_mixer_method_type;
 }
 
 static GstStaticPadTemplate src_factory = GST_STATIC_PAD_TEMPLATE ("src",
@@ -690,6 +753,11 @@ gst_videomixer_class_init (GstVideoMixerClass * klass)
           GST_TYPE_VIDEO_MIXER_BACKGROUND,
           DEFAULT_BACKGROUND, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  g_object_class_install_property (gobject_class, PROP_METHOD,
+      g_param_spec_enum ("method", "Method", "Scale method",
+          GST_TYPE_VIDEO_MIXER_METHOD,
+          DEFAULT_METHOD, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   gstelement_class->request_new_pad =
       GST_DEBUG_FUNCPTR (gst_videomixer_request_new_pad);
   gstelement_class->release_pad =
@@ -747,6 +815,10 @@ gst_videomixer_reset (GstVideoMixer * mix)
 
   mix->next_sinkpad = 0;
   mix->flush_stop_pending = FALSE;
+
+  //Used for changing width and height.
+  mix->tmp_buf = NULL;
+  mix->method = DEFAULT_PROP_METHOD;
 }
 
 static void
@@ -783,6 +855,10 @@ static void
 gst_videomixer_finalize (GObject * object)
 {
   GstVideoMixer *mix = GST_VIDEO_MIXER (object);
+
+  //UNKNOWN: Does this work, shouldn't be this in pads?
+  if (mix->tmp_buf)
+    g_free (mix->tmp_buf);
 
   gst_object_unref (mix->collect);
   g_mutex_free (mix->state_lock);
@@ -1178,6 +1254,10 @@ gst_videomixer_setcaps (GstPad * pad, GstCaps * caps)
       break;
   }
 
+  if (mixer->tmp_buf)
+    g_free (mixer->tmp_buf);
+  mixer->tmp_buf = g_malloc (mixer->out_width * 8 * 4);
+
 done:
   gst_object_unref (mixer);
 
@@ -1228,6 +1308,8 @@ gst_videomixer_request_new_pad (GstElement * element,
     mixpad->zorder = mix->numpads;
     mixpad->xpos = DEFAULT_PAD_XPOS;
     mixpad->ypos = DEFAULT_PAD_YPOS;
+    mixpad->width = DEFAULT_PAD_WIDTH;
+    mixpad->height = DEFAULT_PAD_HEIGHT;
     mixpad->alpha = DEFAULT_PAD_ALPHA;
 
     mixcol = (GstVideoMixerCollect *)
@@ -1410,6 +1492,398 @@ gst_videomixer_fill_queues (GstVideoMixer * mix)
   return eos;
 }
 
+static void
+gst_video_scale_setup_vs_image (VSImage * image, GstVideoFormat format,
+    gint component, gint width, gint height, gint b_w, gint b_h, uint8_t * data)
+{
+  image->real_width =
+      gst_video_format_get_component_width (format, component, width);
+  image->real_height =
+      gst_video_format_get_component_height (format, component, height);
+  image->width =
+      gst_video_format_get_component_width (format, component, MAX (1,
+          width - b_w));
+  image->height =
+      gst_video_format_get_component_height (format, component, MAX (1,
+          height - b_h));
+  image->stride = gst_video_format_get_row_stride (format, component, width);
+
+  image->border_top = (image->real_height - image->height) / 2;
+  image->border_bottom = image->real_height - image->height - image->border_top;
+
+  if (format == GST_VIDEO_FORMAT_YUY2 || format == GST_VIDEO_FORMAT_YVYU
+      || format == GST_VIDEO_FORMAT_UYVY) {
+    g_assert (component == 0);
+
+    image->border_left = (image->real_width - image->width) / 2;
+
+    if (image->border_left % 2 == 1)
+      image->border_left--;
+    image->border_right = image->real_width - image->width - image->border_left;
+  } else {
+    image->border_left = (image->real_width - image->width) / 2;
+    image->border_right = image->real_width - image->width - image->border_left;
+  }
+
+  if (format == GST_VIDEO_FORMAT_I420
+      || format == GST_VIDEO_FORMAT_YV12
+      || format == GST_VIDEO_FORMAT_Y444
+      || format == GST_VIDEO_FORMAT_Y42B || format == GST_VIDEO_FORMAT_Y41B) {
+    image->real_pixels = data + gst_video_format_get_component_offset (format,
+        component, width, height);
+  } else {
+    g_assert (component == 0);
+    image->real_pixels = data;
+  }
+
+  image->pixels =
+      image->real_pixels + image->border_top * image->stride +
+      image->border_left * gst_video_format_get_pixel_stride (format,
+      component);
+}
+
+//Uncoment if you want to implement borders,
+//but remember, i am the guy who doesn't care
+//if this element has borders ;)
+//static const guint8 *
+//_get_black_for_format (GstVideoFormat format)
+//{
+//  static const guint8 black[][4] = {
+//    {255, 0, 0, 0},             /*  0 = ARGB, ABGR, xRGB, xBGR */
+//    {0, 0, 0, 255},             /*  1 = RGBA, BGRA, RGBx, BGRx */
+//    {255, 16, 128, 128},        /*  2 = AYUV */
+//    {0, 0, 0, 0},               /*  3 = RGB and BGR */
+//    {16, 128, 128, 0},          /*  4 = v301 */
+//    {16, 128, 16, 128},         /*  5 = YUY2, YUYV */
+//    {128, 16, 128, 16},         /*  6 = UYVY */
+//    {16, 0, 0, 0},              /*  7 = Y */
+//    {0, 0, 0, 0}                /*  8 = RGB565, RGB666 */
+//  };
+//
+//  switch (format) {
+//    case GST_VIDEO_FORMAT_ARGB:
+//    case GST_VIDEO_FORMAT_ABGR:
+//    case GST_VIDEO_FORMAT_xRGB:
+//    case GST_VIDEO_FORMAT_xBGR:
+//    case GST_VIDEO_FORMAT_ARGB64:
+//      return black[0];
+//    case GST_VIDEO_FORMAT_RGBA:
+//    case GST_VIDEO_FORMAT_BGRA:
+//    case GST_VIDEO_FORMAT_RGBx:
+//    case GST_VIDEO_FORMAT_BGRx:
+//      return black[1];
+//    case GST_VIDEO_FORMAT_AYUV:
+//    case GST_VIDEO_FORMAT_AYUV64:
+//      return black[2];
+//    case GST_VIDEO_FORMAT_RGB:
+//    case GST_VIDEO_FORMAT_BGR:
+//      return black[3];
+//    case GST_VIDEO_FORMAT_v308:
+//      return black[4];
+//    case GST_VIDEO_FORMAT_YUY2:
+//    case GST_VIDEO_FORMAT_YVYU:
+//      return black[5];
+//    case GST_VIDEO_FORMAT_UYVY:
+//      return black[6];
+//    case GST_VIDEO_FORMAT_Y800:
+//    case GST_VIDEO_FORMAT_GRAY8:
+//      return black[7];
+//    case GST_VIDEO_FORMAT_GRAY16_LE:
+//    case GST_VIDEO_FORMAT_GRAY16_BE:
+//    case GST_VIDEO_FORMAT_Y16:
+//      return NULL;              /* Handled by the caller */
+//    case GST_VIDEO_FORMAT_I420:
+//    case GST_VIDEO_FORMAT_YV12:
+//    case GST_VIDEO_FORMAT_Y444:
+//    case GST_VIDEO_FORMAT_Y42B:
+//    case GST_VIDEO_FORMAT_Y41B:
+//      return black[4];          /* Y, U, V, 0 */
+//    case GST_VIDEO_FORMAT_RGB16:
+//    case GST_VIDEO_FORMAT_RGB15:
+//      return black[8];
+//    default:
+//      return NULL;
+//  }
+//}
+
+static GstFlowReturn
+gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
+    GstBuffer * in, guint8 * out)
+{
+  GstFlowReturn ret = GST_FLOW_OK;
+  VSImage dest = { NULL, };
+  VSImage src = { NULL, };
+  VSImage dest_u = { NULL, };
+  VSImage dest_v = { NULL, };
+  VSImage src_u = { NULL, };
+  VSImage src_v = { NULL, };
+  gint method;
+//  const guint8 *black = _get_black_for_format (mix->fmt);
+//  gboolean add_borders;
+
+//  GST_OBJECT_LOCK (mix);
+  method = mix->method;
+//  GST_OBJECT_UNLOCK (mix);
+
+  if (pad->width == 1) {
+    method = GST_VIDEO_SCALE_NEAREST;
+  }
+  if (method == GST_VIDEO_SCALE_4TAP && (pad->width < 4 || pad->height < 4)) {
+    method = GST_VIDEO_SCALE_BILINEAR;
+  }
+
+  gst_video_scale_setup_vs_image (&src, mix->fmt, 0,
+      pad->width, pad->height, 0, 0, GST_BUFFER_DATA (in));
+  gst_video_scale_setup_vs_image (&dest, mix->fmt, 0,
+      mix->out_width, mix->out_height, 0, 0, GST_BUFFER_DATA (out));
+
+  if (mix->fmt == GST_VIDEO_FORMAT_I420
+      || mix->fmt == GST_VIDEO_FORMAT_YV12
+      || mix->fmt == GST_VIDEO_FORMAT_Y444
+      || mix->fmt == GST_VIDEO_FORMAT_Y42B
+      || mix->fmt == GST_VIDEO_FORMAT_Y41B) {
+    gst_video_scale_setup_vs_image (&src_u, mix->fmt, 1,
+        pad->width, pad->height, 0, 0, GST_BUFFER_DATA (in));
+    gst_video_scale_setup_vs_image (&src_v, mix->fmt, 2,
+        pad->width, pad->height, 0, 0, GST_BUFFER_DATA (in));
+    gst_video_scale_setup_vs_image (&dest_u, mix->fmt, 1,
+        mix->out_width, mix->out_height, 0, 0, GST_BUFFER_DATA (out));
+    gst_video_scale_setup_vs_image (&dest_v, mix->fmt, 2,
+        pad->width, pad->height, 0, 0, GST_BUFFER_DATA (out));
+  }
+
+  switch (mix->fmt) {
+    case GST_VIDEO_FORMAT_RGBx:
+    case GST_VIDEO_FORMAT_xRGB:
+    case GST_VIDEO_FORMAT_BGRx:
+    case GST_VIDEO_FORMAT_xBGR:
+    case GST_VIDEO_FORMAT_RGBA:
+    case GST_VIDEO_FORMAT_ARGB:
+    case GST_VIDEO_FORMAT_BGRA:
+    case GST_VIDEO_FORMAT_ABGR:
+    case GST_VIDEO_FORMAT_AYUV:
+//      I don't care about borders, we are scaling not adding borders.
+//      if (add_borders)
+//        vs_fill_borders_RGBA (&dest, black);
+      switch (method) {
+        case GST_VIDEO_SCALE_NEAREST:
+          vs_image_scale_nearest_RGBA (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_BILINEAR:
+          vs_image_scale_linear_RGBA (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_4TAP:
+          vs_image_scale_4tap_RGBA (&dest, &src, out);
+          break;
+        default:
+          goto unknown_mode;
+      }
+      break;
+    case GST_VIDEO_FORMAT_ARGB64:
+    case GST_VIDEO_FORMAT_AYUV64:
+//      I don't care about borders, we are scaling not adding borders.
+//      if (add_borders)
+//        vs_fill_borders_AYUV64 (&dest, black);
+      switch (method) {
+        case GST_VIDEO_SCALE_NEAREST:
+          vs_image_scale_nearest_AYUV64 (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_BILINEAR:
+          vs_image_scale_linear_AYUV64 (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_4TAP:
+          vs_image_scale_4tap_AYUV64 (&dest, &src, out);
+          break;
+        default:
+          goto unknown_mode;
+      }
+      break;
+    case GST_VIDEO_FORMAT_RGB:
+    case GST_VIDEO_FORMAT_BGR:
+    case GST_VIDEO_FORMAT_v308:
+//      I don't care about borders, we are scaling not adding borders.
+//      if (add_borders)
+//       vs_fill_borders_RGB (&dest, black);
+      switch (method) {
+        case GST_VIDEO_SCALE_NEAREST:
+          vs_image_scale_nearest_RGB (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_BILINEAR:
+          vs_image_scale_linear_RGB (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_4TAP:
+          vs_image_scale_4tap_RGB (&dest, &src, out);
+          break;
+        default:
+          goto unknown_mode;
+      }
+      break;
+    case GST_VIDEO_FORMAT_YUY2:
+    case GST_VIDEO_FORMAT_YVYU:
+//      I don't care about borders, we are scaling not adding borders.
+//      if (add_borders)
+//        vs_fill_borders_YUYV (&dest, black);
+      switch (method) {
+        case GST_VIDEO_SCALE_NEAREST:
+          vs_image_scale_nearest_YUYV (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_BILINEAR:
+          vs_image_scale_linear_YUYV (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_4TAP:
+          vs_image_scale_4tap_YUYV (&dest, &src, out);
+          break;
+        default:
+          goto unknown_mode;
+      }
+      break;
+    case GST_VIDEO_FORMAT_UYVY:
+//      I don't care about borders, we are scaling not adding borders.
+//      if (add_borders)
+//        vs_fill_borders_UYVY (&dest, black);
+      switch (method) {
+        case GST_VIDEO_SCALE_NEAREST:
+          vs_image_scale_nearest_UYVY (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_BILINEAR:
+          vs_image_scale_linear_UYVY (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_4TAP:
+          vs_image_scale_4tap_UYVY (&dest, &src, out);
+          break;
+        default:
+          goto unknown_mode;
+      }
+      break;
+    case GST_VIDEO_FORMAT_Y800:
+    case GST_VIDEO_FORMAT_GRAY8:
+//      I don't care about borders, we are scaling not adding borders.
+//      if (add_borders)
+//        vs_fill_borders_Y (&dest, black);
+      switch (method) {
+        case GST_VIDEO_SCALE_NEAREST:
+          vs_image_scale_nearest_Y (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_BILINEAR:
+          vs_image_scale_linear_Y (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_4TAP:
+          vs_image_scale_4tap_Y (&dest, &src, out);
+          break;
+        default:
+          goto unknown_mode;
+      }
+      break;
+    case GST_VIDEO_FORMAT_GRAY16_LE:
+    case GST_VIDEO_FORMAT_GRAY16_BE:
+    case GST_VIDEO_FORMAT_Y16:
+//      I don't care about borders, we are scaling not adding borders.
+//      if (add_borders)
+//        vs_fill_borders_Y16 (&dest, 0);
+      switch (method) {
+        case GST_VIDEO_SCALE_NEAREST:
+          vs_image_scale_nearest_Y16 (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_BILINEAR:
+          vs_image_scale_linear_Y16 (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_4TAP:
+          vs_image_scale_4tap_Y16 (&dest, &src, out);
+          break;
+        default:
+          goto unknown_mode;
+      }
+      break;
+    case GST_VIDEO_FORMAT_I420:
+    case GST_VIDEO_FORMAT_YV12:
+    case GST_VIDEO_FORMAT_Y444:
+    case GST_VIDEO_FORMAT_Y42B:
+    case GST_VIDEO_FORMAT_Y41B:
+//      I don't care about borders, we are scaling not adding borders.
+//      if (add_borders) {
+//        vs_fill_borders_Y (&dest, black);
+//        vs_fill_borders_Y (&dest_u, black + 1);
+//        vs_fill_borders_Y (&dest_v, black + 2);
+//      }
+      switch (method) {
+        case GST_VIDEO_SCALE_NEAREST:
+          vs_image_scale_nearest_Y (&dest, &src, out);
+          vs_image_scale_nearest_Y (&dest_u, &src_u, out);
+          vs_image_scale_nearest_Y (&dest_v, &src_v, out);
+          break;
+        case GST_VIDEO_SCALE_BILINEAR:
+          vs_image_scale_linear_Y (&dest, &src, out);
+          vs_image_scale_linear_Y (&dest_u, &src_u, out);
+          vs_image_scale_linear_Y (&dest_v, &src_v, out);
+          break;
+        case GST_VIDEO_SCALE_4TAP:
+          vs_image_scale_4tap_Y (&dest, &src, out);
+          vs_image_scale_4tap_Y (&dest_u, &src_u, out);
+          vs_image_scale_4tap_Y (&dest_v, &src_v, out);
+          break;
+        default:
+          goto unknown_mode;
+      }
+      break;
+    case GST_VIDEO_FORMAT_RGB16:
+//      I don't care about borders, we are scaling not adding borders.
+//      if (add_borders)
+//        vs_fill_borders_RGB565 (&dest, black);
+      switch (method) {
+        case GST_VIDEO_SCALE_NEAREST:
+          vs_image_scale_nearest_RGB565 (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_BILINEAR:
+          vs_image_scale_linear_RGB565 (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_4TAP:
+          vs_image_scale_4tap_RGB565 (&dest, &src, out);
+          break;
+        default:
+          goto unknown_mode;
+      }
+      break;
+    case GST_VIDEO_FORMAT_RGB15:
+//      I don't care about borders, we are scaling not adding borders.
+//      if (add_borders)
+//        vs_fill_borders_RGB555 (&dest, black);
+      switch (method) {
+        case GST_VIDEO_SCALE_NEAREST:
+          vs_image_scale_nearest_RGB555 (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_BILINEAR:
+          vs_image_scale_linear_RGB555 (&dest, &src, out);
+          break;
+        case GST_VIDEO_SCALE_4TAP:
+          vs_image_scale_4tap_RGB555 (&dest, &src, out);
+          break;
+        default:
+          goto unknown_mode;
+      }
+      break;
+    default:
+      goto unsupported;
+  }
+
+  GST_LOG_OBJECT (mix, "pushing buffer of %d bytes", GST_BUFFER_SIZE (out));
+
+  return ret;
+
+  /* ERRORS */
+unsupported:
+  {
+    GST_ELEMENT_ERROR (mix, STREAM, NOT_IMPLEMENTED, (NULL),
+        ("Unsupported format %d for scaling method %d", mix->fmt, method));
+    return GST_FLOW_ERROR;
+  }
+unknown_mode:
+  {
+    GST_ELEMENT_ERROR (mix, STREAM, NOT_IMPLEMENTED, (NULL),
+        ("Unknown scaling method %d", mix->method));
+    return GST_FLOW_ERROR;
+  }
+}
+
 /* blend all buffers present on the pads */
 static void
 gst_videomixer_blend_buffers (GstVideoMixer * mix, GstBuffer * outbuf)
@@ -1446,9 +1920,17 @@ gst_videomixer_blend_buffers (GstVideoMixer * mix, GstBuffer * outbuf)
       if (GST_CLOCK_TIME_IS_VALID (stream_time))
         gst_object_sync_values (G_OBJECT (pad), stream_time);
 
-      blend (GST_BUFFER_DATA (mixcol->buffer),
-          pad->xpos, pad->ypos, pad->in_width, pad->in_height, pad->alpha,
-          GST_BUFFER_DATA (outbuf), mix->out_width, mix->out_height);
+      if (pad->in_width == 0 || pad->in_height == 0
+          || (pad->in_width == pad->width && pad->in_height == pad->height)) {
+        blend (GST_BUFFER_DATA (mixcol->buffer), pad->xpos, pad->ypos,
+            pad->in_width, pad->in_height, pad->alpha, GST_BUFFER_DATA (outbuf),
+            mix->out_width, mix->out_height);
+      } else {
+        gst_video_scale_transform (mix, pad, mixcol->buffer, mix->tmp_buf);
+        blend (GST_BUFFER_DATA (mix->tmp_buf),
+            pad->xpos, pad->ypos, pad->width, pad->height, pad->alpha,
+            GST_BUFFER_DATA (outbuf), mix->out_width, mix->out_height);
+      }
     }
   }
 }
@@ -1847,6 +2329,9 @@ gst_videomixer_set_property (GObject * object,
     case PROP_BACKGROUND:
       mix->background = g_value_get_enum (value);
       break;
+    case PROP_METHOD:
+      mix->method = g_value_get_enum (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -1896,6 +2381,8 @@ plugin_init (GstPlugin * plugin)
       "video mixer");
 
   gst_video_mixer_init_blend ();
+
+  vs_4tap_init ();
 
   return gst_element_register (plugin, "videomixer", GST_RANK_PRIMARY,
       GST_TYPE_VIDEO_MIXER) && gst_videomixer2_register (plugin);

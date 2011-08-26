@@ -25,6 +25,8 @@
 #include "videomixerpad.h"
 #include "blend.h"
 
+#include "vs_image.h"
+
 G_BEGIN_DECLS
 
 #define GST_TYPE_VIDEO_MIXER (gst_videomixer_get_type())
@@ -36,6 +38,12 @@ G_BEGIN_DECLS
         (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_VIDEO_MIXER))
 #define GST_IS_VIDEO_MIXER_CLASS(klass) \
         (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_VIDEO_MIXER))
+
+typedef enum {
+  GST_VIDEO_SCALE_NEAREST,
+  GST_VIDEO_SCALE_BILINEAR,
+  GST_VIDEO_SCALE_4TAP
+} GstVideoMixerMethod;
 
 typedef struct _GstVideoMixer GstVideoMixer;
 typedef struct _GstVideoMixerClass GstVideoMixerClass;
@@ -93,6 +101,7 @@ struct _GstVideoMixer
   gboolean sendseg;
 
   GstVideoMixerBackground background;
+  GstVideoMixerMethod method;
 
   gint fps_n;
   gint fps_d;
@@ -119,6 +128,9 @@ struct _GstVideoMixer
   FillColorFunction fill_color;
 
   gboolean flush_stop_pending;
+
+  /*< private >*/
+  guint8 *tmp_buf;
 };
 
 struct _GstVideoMixerClass
