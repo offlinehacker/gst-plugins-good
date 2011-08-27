@@ -1,5 +1,6 @@
 /* Generic video mixer plugin
- * Copyright (C) 2004 Wim Taymans <wim@fluendo.com>
+ * Copyright (C) 2004 Wim Taymans   <wim@fluendo.com>
+ * Copyright (C) 2011 Jaka Hudoklin <jakakahudoklin@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -67,6 +68,8 @@
  * |[
  * gst-launch videotestsrc pattern="snow" ! video/x-raw-yuv, framerate=\(fraction\)10/1, width=200, height=150 ! videomixer name=mix sink_1::xpos=20 sink_1::ypos=20 sink_1::alpha=0.5 ! ffmpegcolorspace ! xvimagesink videotestsrc ! video/x-raw-yuv, framerate=\(fraction\)10/1, width=640, height=360 ! mix.
  * ]| Set position and alpha on the mixer using #GstVideoMixerPad properties.
+ * gst-launch videotestsrc pattern="snow" ! video/x-raw-yuv, framerate=\(fraction\)10/1, width=200, height=150 ! videomixer name=mix sink_1::xpos=20 sink_1::width=300 sink_1::height=200 ! ffmpegcolorspace ! xvimagesink videotestsrc ! video/x-raw-yuv, framerate=\(fraction\)10/1, width=640, height=360 ! mix.
+ * ]| Set width and height on the mixer using #GstVideoMixerPad properties.
  * </refsect2>
  */
 
