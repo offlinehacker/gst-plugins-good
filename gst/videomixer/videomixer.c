@@ -125,7 +125,7 @@ static void gst_videomixer_sort_pads (GstVideoMixer * mix);
 
 //Scale transformation functions
 static GstFlowReturn gst_video_scale_transform (GstVideoMixer * mix,
-    GstVideoMixerPad * pad, GstBuffer * in, GstBuffer * out);
+    GstVideoMixerPad * pad, GstBuffer * in, uint8_t * out);
 //static const guint8 * _get_black_for_format (GstVideoFormat format);
 static void gst_video_scale_setup_vs_image (VSImage * image,
     GstVideoFormat format, gint component, gint width, gint height, gint b_w,
@@ -1608,7 +1608,7 @@ gst_video_scale_setup_vs_image (VSImage * image, GstVideoFormat format,
 
 static GstFlowReturn
 gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
-    GstBuffer * in, GstBuffer * out)
+    GstBuffer * in, uint8_t * out)
 {
   GstFlowReturn ret = GST_FLOW_OK;
   VSImage dest = { NULL, };
@@ -1638,7 +1638,7 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
   gst_video_scale_setup_vs_image (&src, mix->fmt, 0,
       pad->in_width, pad->in_height, 0, 0, GST_BUFFER_DATA (in));
   gst_video_scale_setup_vs_image (&dest, mix->fmt, 0,
-      pad->width, pad->height, 0, 0, GST_BUFFER_DATA (out));
+      pad->width, pad->height, 0, 0, out);
 
   if (mix->fmt == GST_VIDEO_FORMAT_I420
       || mix->fmt == GST_VIDEO_FORMAT_YV12
@@ -1651,9 +1651,9 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
     gst_video_scale_setup_vs_image (&src_v, mix->fmt, 2,
         pad->in_width, pad->in_height, 0, 0, GST_BUFFER_DATA (in));
     gst_video_scale_setup_vs_image (&dest_u, mix->fmt, 1,
-        pad->width, pad->height, 0, 0, GST_BUFFER_DATA (out));
+        pad->width, pad->height, 0, 0, out);
     gst_video_scale_setup_vs_image (&dest_v, mix->fmt, 2,
-        pad->width, pad->height, 0, 0, GST_BUFFER_DATA (out));
+        pad->width, pad->height, 0, 0, out);
   }
 
   switch (mix->fmt) {
@@ -1896,8 +1896,8 @@ gst_videomixer_blend_buffers (GstVideoMixer * mix, GstBuffer * outbuf)
 {
   GSList *walk;
   BlendFunction blend;
-  GstFlowReturn ret = GST_FLOW_OK;
-  GstBuffer *tmpbuf = NULL;
+//  GstFlowReturn ret = GST_FLOW_OK;
+  uint8_t *tbuf = NULL;
   size_t outsize = 0;
 
   if (mix->background == VIDEO_MIXER_BACKGROUND_TRANSPARENT) {
@@ -1912,12 +1912,13 @@ gst_videomixer_blend_buffers (GstVideoMixer * mix, GstBuffer * outbuf)
     GstVideoMixerCollect *mixcol = pad->mixcol;
 
     //allocate temporary buffer
-    //TODO: Do this only once per pad!!!
+    //TODO: Do this only once per pad and use better allocation methods!!!
     if (pad->width != 0 && pad->height != 0) {
-      outsize = gst_video_format_get_size (mix->fmt, pad->width, pad->height);
-      ret =
-          gst_pad_alloc_buffer (mix->srcpad, GST_BUFFER_OFFSET_NONE,
-          outsize, GST_PAD_CAPS (pad), &tmpbuf);
+      outsize =
+          (pad->in_width >
+          pad->width ? pad->in_width : pad->width) * (pad->in_height >
+          pad->height ? pad->in_height : pad->height) * 8 * 4;
+      tbuf = g_malloc (outsize);
     }
 
     walk = g_slist_next (walk);
@@ -1944,16 +1945,16 @@ gst_videomixer_blend_buffers (GstVideoMixer * mix, GstBuffer * outbuf)
             pad->in_width, pad->in_height, pad->alpha, GST_BUFFER_DATA (outbuf),
             mix->out_width, mix->out_height);
       } else {
-        gst_video_scale_transform (mix, pad, mixcol->buffer, tmpbuf);
-        blend (GST_BUFFER_DATA (tmpbuf),
+        gst_video_scale_transform (mix, pad, mixcol->buffer, tbuf);
+        blend (tbuf,
             pad->xpos, pad->ypos, pad->width, pad->height, pad->alpha,
             GST_BUFFER_DATA (outbuf), mix->out_width, mix->out_height);
       }
     }
 
-    if (tmpbuf) {
-      gst_buffer_unref (tmpbuf);
-      tmpbuf = NULL;
+    if (tbuf) {
+      g_free (tbuf);
+      tbuf = NULL;
     }
   }
 }
