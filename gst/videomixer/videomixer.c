@@ -125,7 +125,7 @@ static void gst_videomixer_sort_pads (GstVideoMixer * mix);
 
 //Scale transformation functions
 static GstFlowReturn gst_video_scale_transform (GstVideoMixer * mix,
-    GstVideoMixerPad * pad, GstBuffer * in, guint8 * out);
+    GstVideoMixerPad * pad, GstBuffer * in, GstBuffer * out);
 //static const guint8 * _get_black_for_format (GstVideoFormat format);
 static void gst_video_scale_setup_vs_image (VSImage * image,
     GstVideoFormat format, gint component, gint width, gint height, gint b_w,
@@ -172,12 +172,12 @@ gst_videomixer_pad_class_init (GstVideoMixerPadClass * klass)
       g_param_spec_int ("ypos", "Y Position", "Y Position of the picture",
           G_MININT, G_MAXINT, DEFAULT_PAD_YPOS,
           G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
-  g_object_class_install_property (gobject_class, PROP_PAD_XPOS,
-      g_param_spec_int ("width", "Width", "Width of the picture in mix",
+  g_object_class_install_property (gobject_class, PROP_PAD_WIDTH,
+      g_param_spec_uint ("width", "Width", "Width of the picture in mix",
           0, G_MAXINT, DEFAULT_PAD_WIDTH,
           G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
-  g_object_class_install_property (gobject_class, PROP_PAD_YPOS,
-      g_param_spec_int ("height", "Height", "Height of the picture in mix",
+  g_object_class_install_property (gobject_class, PROP_PAD_HEIGHT,
+      g_param_spec_uint ("height", "Height", "Height of the picture in mix",
           0, G_MAXINT, DEFAULT_PAD_HEIGHT,
           G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property (gobject_class, PROP_PAD_ALPHA,
@@ -203,10 +203,10 @@ gst_videomixer_pad_get_property (GObject * object, guint prop_id,
       g_value_set_int (value, pad->ypos);
       break;
     case PROP_PAD_WIDTH:
-      g_value_set_int (value, pad->width);
+      g_value_set_uint (value, pad->width);
       break;
     case PROP_PAD_HEIGHT:
-      g_value_set_int (value, pad->height);
+      g_value_set_uint (value, pad->height);
       break;
     case PROP_PAD_ALPHA:
       g_value_set_double (value, pad->alpha);
@@ -1113,6 +1113,10 @@ gst_videomixer_setcaps (GstPad * pad, GstCaps * caps)
   mixer->fill_checker = NULL;
   mixer->fill_color = NULL;
 
+  if (mixer->tmp_buf)
+    g_free (mixer->tmp_buf);
+  mixer->tmp_buf = g_malloc (mixer->out_width * 8 * 4);
+
   if (!gst_video_format_parse_caps (caps, &mixer->fmt, NULL, NULL))
     goto done;
 
@@ -1253,10 +1257,6 @@ gst_videomixer_setcaps (GstPad * pad, GstCaps * caps)
     default:
       break;
   }
-
-  if (mixer->tmp_buf)
-    g_free (mixer->tmp_buf);
-  mixer->tmp_buf = g_malloc (mixer->out_width * 8 * 4);
 
 done:
   gst_object_unref (mixer);
@@ -1608,7 +1608,7 @@ gst_video_scale_setup_vs_image (VSImage * image, GstVideoFormat format,
 
 static GstFlowReturn
 gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
-    GstBuffer * in, guint8 * out)
+    GstBuffer * in, GstBuffer * out)
 {
   GstFlowReturn ret = GST_FLOW_OK;
   VSImage dest = { NULL, };
@@ -1621,33 +1621,37 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
 //  const guint8 *black = _get_black_for_format (mix->fmt);
 //  gboolean add_borders;
 
+  GST_DEBUG_OBJECT (mix, "Buffers are %x %x", in, out);
+
 //  GST_OBJECT_LOCK (mix);
   method = mix->method;
 //  GST_OBJECT_UNLOCK (mix);
 
-  if (pad->width == 1) {
+  if (pad->in_width == 1) {
     method = GST_VIDEO_SCALE_NEAREST;
   }
-  if (method == GST_VIDEO_SCALE_4TAP && (pad->width < 4 || pad->height < 4)) {
+  if (method == GST_VIDEO_SCALE_4TAP &&
+      (pad->in_width < 4 || pad->in_height < 4)) {
     method = GST_VIDEO_SCALE_BILINEAR;
   }
 
   gst_video_scale_setup_vs_image (&src, mix->fmt, 0,
-      pad->width, pad->height, 0, 0, GST_BUFFER_DATA (in));
+      pad->in_width, pad->in_height, 0, 0, GST_BUFFER_DATA (in));
   gst_video_scale_setup_vs_image (&dest, mix->fmt, 0,
-      mix->out_width, mix->out_height, 0, 0, GST_BUFFER_DATA (out));
+      pad->width, pad->height, 0, 0, GST_BUFFER_DATA (out));
 
   if (mix->fmt == GST_VIDEO_FORMAT_I420
       || mix->fmt == GST_VIDEO_FORMAT_YV12
       || mix->fmt == GST_VIDEO_FORMAT_Y444
       || mix->fmt == GST_VIDEO_FORMAT_Y42B
       || mix->fmt == GST_VIDEO_FORMAT_Y41B) {
+    GST_DEBUG_OBJECT (mix, "Special u/v channels");
     gst_video_scale_setup_vs_image (&src_u, mix->fmt, 1,
-        pad->width, pad->height, 0, 0, GST_BUFFER_DATA (in));
+        pad->in_width, pad->in_height, 0, 0, GST_BUFFER_DATA (in));
     gst_video_scale_setup_vs_image (&src_v, mix->fmt, 2,
-        pad->width, pad->height, 0, 0, GST_BUFFER_DATA (in));
+        pad->in_width, pad->in_height, 0, 0, GST_BUFFER_DATA (in));
     gst_video_scale_setup_vs_image (&dest_u, mix->fmt, 1,
-        mix->out_width, mix->out_height, 0, 0, GST_BUFFER_DATA (out));
+        pad->width, pad->height, 0, 0, GST_BUFFER_DATA (out));
     gst_video_scale_setup_vs_image (&dest_v, mix->fmt, 2,
         pad->width, pad->height, 0, 0, GST_BUFFER_DATA (out));
   }
@@ -1667,13 +1671,15 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
 //        vs_fill_borders_RGBA (&dest, black);
       switch (method) {
         case GST_VIDEO_SCALE_NEAREST:
-          vs_image_scale_nearest_RGBA (&dest, &src, out);
+          GST_DEBUG_OBJECT (mix, "nearest");
+          vs_image_scale_nearest_RGBA (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_BILINEAR:
-          vs_image_scale_linear_RGBA (&dest, &src, out);
+          vs_image_scale_linear_RGBA (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_4TAP:
-          vs_image_scale_4tap_RGBA (&dest, &src, out);
+          GST_DEBUG_OBJECT (mix, "4tap");
+          vs_image_scale_4tap_RGBA (&dest, &src, mix->tmp_buf);
           break;
         default:
           goto unknown_mode;
@@ -1686,13 +1692,13 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
 //        vs_fill_borders_AYUV64 (&dest, black);
       switch (method) {
         case GST_VIDEO_SCALE_NEAREST:
-          vs_image_scale_nearest_AYUV64 (&dest, &src, out);
+          vs_image_scale_nearest_AYUV64 (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_BILINEAR:
-          vs_image_scale_linear_AYUV64 (&dest, &src, out);
+          vs_image_scale_linear_AYUV64 (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_4TAP:
-          vs_image_scale_4tap_AYUV64 (&dest, &src, out);
+          vs_image_scale_4tap_AYUV64 (&dest, &src, mix->tmp_buf);
           break;
         default:
           goto unknown_mode;
@@ -1706,13 +1712,13 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
 //       vs_fill_borders_RGB (&dest, black);
       switch (method) {
         case GST_VIDEO_SCALE_NEAREST:
-          vs_image_scale_nearest_RGB (&dest, &src, out);
+          vs_image_scale_nearest_RGB (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_BILINEAR:
-          vs_image_scale_linear_RGB (&dest, &src, out);
+          vs_image_scale_linear_RGB (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_4TAP:
-          vs_image_scale_4tap_RGB (&dest, &src, out);
+          vs_image_scale_4tap_RGB (&dest, &src, mix->tmp_buf);
           break;
         default:
           goto unknown_mode;
@@ -1725,13 +1731,13 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
 //        vs_fill_borders_YUYV (&dest, black);
       switch (method) {
         case GST_VIDEO_SCALE_NEAREST:
-          vs_image_scale_nearest_YUYV (&dest, &src, out);
+          vs_image_scale_nearest_YUYV (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_BILINEAR:
-          vs_image_scale_linear_YUYV (&dest, &src, out);
+          vs_image_scale_linear_YUYV (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_4TAP:
-          vs_image_scale_4tap_YUYV (&dest, &src, out);
+          vs_image_scale_4tap_YUYV (&dest, &src, mix->tmp_buf);
           break;
         default:
           goto unknown_mode;
@@ -1743,13 +1749,13 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
 //        vs_fill_borders_UYVY (&dest, black);
       switch (method) {
         case GST_VIDEO_SCALE_NEAREST:
-          vs_image_scale_nearest_UYVY (&dest, &src, out);
+          vs_image_scale_nearest_UYVY (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_BILINEAR:
-          vs_image_scale_linear_UYVY (&dest, &src, out);
+          vs_image_scale_linear_UYVY (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_4TAP:
-          vs_image_scale_4tap_UYVY (&dest, &src, out);
+          vs_image_scale_4tap_UYVY (&dest, &src, mix->tmp_buf);
           break;
         default:
           goto unknown_mode;
@@ -1762,13 +1768,13 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
 //        vs_fill_borders_Y (&dest, black);
       switch (method) {
         case GST_VIDEO_SCALE_NEAREST:
-          vs_image_scale_nearest_Y (&dest, &src, out);
+          vs_image_scale_nearest_Y (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_BILINEAR:
-          vs_image_scale_linear_Y (&dest, &src, out);
+          vs_image_scale_linear_Y (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_4TAP:
-          vs_image_scale_4tap_Y (&dest, &src, out);
+          vs_image_scale_4tap_Y (&dest, &src, mix->tmp_buf);
           break;
         default:
           goto unknown_mode;
@@ -1782,13 +1788,13 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
 //        vs_fill_borders_Y16 (&dest, 0);
       switch (method) {
         case GST_VIDEO_SCALE_NEAREST:
-          vs_image_scale_nearest_Y16 (&dest, &src, out);
+          vs_image_scale_nearest_Y16 (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_BILINEAR:
-          vs_image_scale_linear_Y16 (&dest, &src, out);
+          vs_image_scale_linear_Y16 (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_4TAP:
-          vs_image_scale_4tap_Y16 (&dest, &src, out);
+          vs_image_scale_4tap_Y16 (&dest, &src, mix->tmp_buf);
           break;
         default:
           goto unknown_mode;
@@ -1807,19 +1813,19 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
 //      }
       switch (method) {
         case GST_VIDEO_SCALE_NEAREST:
-          vs_image_scale_nearest_Y (&dest, &src, out);
-          vs_image_scale_nearest_Y (&dest_u, &src_u, out);
-          vs_image_scale_nearest_Y (&dest_v, &src_v, out);
+          vs_image_scale_nearest_Y (&dest, &src, mix->tmp_buf);
+          vs_image_scale_nearest_Y (&dest_u, &src_u, mix->tmp_buf);
+          vs_image_scale_nearest_Y (&dest_v, &src_v, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_BILINEAR:
-          vs_image_scale_linear_Y (&dest, &src, out);
-          vs_image_scale_linear_Y (&dest_u, &src_u, out);
-          vs_image_scale_linear_Y (&dest_v, &src_v, out);
+          vs_image_scale_linear_Y (&dest, &src, mix->tmp_buf);
+          vs_image_scale_linear_Y (&dest_u, &src_u, mix->tmp_buf);
+          vs_image_scale_linear_Y (&dest_v, &src_v, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_4TAP:
-          vs_image_scale_4tap_Y (&dest, &src, out);
-          vs_image_scale_4tap_Y (&dest_u, &src_u, out);
-          vs_image_scale_4tap_Y (&dest_v, &src_v, out);
+          vs_image_scale_4tap_Y (&dest, &src, mix->tmp_buf);
+          vs_image_scale_4tap_Y (&dest_u, &src_u, mix->tmp_buf);
+          vs_image_scale_4tap_Y (&dest_v, &src_v, mix->tmp_buf);
           break;
         default:
           goto unknown_mode;
@@ -1831,13 +1837,13 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
 //        vs_fill_borders_RGB565 (&dest, black);
       switch (method) {
         case GST_VIDEO_SCALE_NEAREST:
-          vs_image_scale_nearest_RGB565 (&dest, &src, out);
+          vs_image_scale_nearest_RGB565 (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_BILINEAR:
-          vs_image_scale_linear_RGB565 (&dest, &src, out);
+          vs_image_scale_linear_RGB565 (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_4TAP:
-          vs_image_scale_4tap_RGB565 (&dest, &src, out);
+          vs_image_scale_4tap_RGB565 (&dest, &src, mix->tmp_buf);
           break;
         default:
           goto unknown_mode;
@@ -1849,13 +1855,13 @@ gst_video_scale_transform (GstVideoMixer * mix, GstVideoMixerPad * pad,
 //        vs_fill_borders_RGB555 (&dest, black);
       switch (method) {
         case GST_VIDEO_SCALE_NEAREST:
-          vs_image_scale_nearest_RGB555 (&dest, &src, out);
+          vs_image_scale_nearest_RGB555 (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_BILINEAR:
-          vs_image_scale_linear_RGB555 (&dest, &src, out);
+          vs_image_scale_linear_RGB555 (&dest, &src, mix->tmp_buf);
           break;
         case GST_VIDEO_SCALE_4TAP:
-          vs_image_scale_4tap_RGB555 (&dest, &src, out);
+          vs_image_scale_4tap_RGB555 (&dest, &src, mix->tmp_buf);
           break;
         default:
           goto unknown_mode;
@@ -1890,17 +1896,29 @@ gst_videomixer_blend_buffers (GstVideoMixer * mix, GstBuffer * outbuf)
 {
   GSList *walk;
   BlendFunction blend;
+  GstFlowReturn ret = GST_FLOW_OK;
+  GstBuffer *tmpbuf = NULL;
+  size_t outsize = 0;
+
   if (mix->background == VIDEO_MIXER_BACKGROUND_TRANSPARENT) {
     blend = mix->overlay;
   } else {
     blend = mix->blend;
   }
 
-
   walk = mix->sinkpads;
   while (walk) {                /* We walk with this list because it's ordered */
     GstVideoMixerPad *pad = GST_VIDEO_MIXER_PAD (walk->data);
     GstVideoMixerCollect *mixcol = pad->mixcol;
+
+    //allocate temporary buffer
+    //TODO: Do this only once per pad!!!
+    if (pad->width != 0 && pad->height != 0) {
+      outsize = gst_video_format_get_size (mix->fmt, pad->width, pad->height);
+      ret =
+          gst_pad_alloc_buffer (mix->srcpad, GST_BUFFER_OFFSET_NONE,
+          outsize, GST_PAD_CAPS (pad), &tmpbuf);
+    }
 
     walk = g_slist_next (walk);
 
@@ -1920,17 +1938,22 @@ gst_videomixer_blend_buffers (GstVideoMixer * mix, GstBuffer * outbuf)
       if (GST_CLOCK_TIME_IS_VALID (stream_time))
         gst_object_sync_values (G_OBJECT (pad), stream_time);
 
-      if (pad->in_width == 0 || pad->in_height == 0
-          || (pad->in_width == pad->width && pad->in_height == pad->height)) {
+      if (pad->width == 0 || pad->height == 0 || (pad->in_width == pad->width
+              && pad->in_height == pad->height)) {
         blend (GST_BUFFER_DATA (mixcol->buffer), pad->xpos, pad->ypos,
             pad->in_width, pad->in_height, pad->alpha, GST_BUFFER_DATA (outbuf),
             mix->out_width, mix->out_height);
       } else {
-        gst_video_scale_transform (mix, pad, mixcol->buffer, mix->tmp_buf);
-        blend (GST_BUFFER_DATA (mix->tmp_buf),
+        gst_video_scale_transform (mix, pad, mixcol->buffer, tmpbuf);
+        blend (GST_BUFFER_DATA (tmpbuf),
             pad->xpos, pad->ypos, pad->width, pad->height, pad->alpha,
             GST_BUFFER_DATA (outbuf), mix->out_width, mix->out_height);
       }
+    }
+
+    if (tmpbuf) {
+      gst_buffer_unref (tmpbuf);
+      tmpbuf = NULL;
     }
   }
 }
@@ -2312,6 +2335,9 @@ gst_videomixer_get_property (GObject * object,
   switch (prop_id) {
     case PROP_BACKGROUND:
       g_value_set_enum (value, mix->background);
+      break;
+    case PROP_METHOD:
+      g_value_set_enum (value, mix->method);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
