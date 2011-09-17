@@ -23,6 +23,9 @@ autoregen.sh
 ABOUT-NLS
 _stdint.h
 gst-plugins-good-*.tar.*
+.cproject
+.project
+.settings/*
 
 /m4
 
